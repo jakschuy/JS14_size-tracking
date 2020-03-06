@@ -1,0 +1,161 @@
+library(tidyverse)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(pastecs)
+
+#input stuff, manual input
+filename <- "size over days hips hes updated for hipsc exp5_raw tab included.txt"
+exp.exclude <- c("exp3")
+concentration.exclude <- c(0.2, 1, 4)
+lvlnorm <- c("2 0")
+
+#START
+#get working directory from Script environment
+setwd(paste(rstudioapi::getSourceEditorContext()$path, "/../..", sep = ""))
+
+#checks and creates subfolder structure
+if (!dir.exists("1_raw")) {
+  dir.create("1_raw")
+}
+if (!dir.exists("2_graphs")) {
+  dir.create("2_graphs")
+}
+
+#read input-raw
+main <- read.delim(paste("1_raw/",filename, sep = ""), sep = "\t", dec = ",", header = TRUE, skipNul = TRUE, fileEncoding = "UTF-16")
+
+#exclude unnecessary concentrations
+main.short <- main[!main$concentration %in% c(concentration.exclude),]
+
+#exclude unnecessary experiments
+exp.all <- colnames(main.short[startsWith(colnames(main.short), "exp")])
+exp.keep <- c(exp.all)[!c(exp.all %in% exp.exclude)]
+main.short2 <- main.short[,c(
+      colnames(main.short[1:2]),   
+      colnames(main.short)[colnames(main.short) %in% c(exp.keep)]   )] 
+
+#generate levels for data
+main.short2$lvl <- paste(main.short2$day, main.short2$concentration)
+lvlAll <- levels(as.factor(main.short2$lvl))
+lvlDay <- levels(as.factor(main.short2$day))
+lvlConc <- levels(as.factor(main.short2$concentration))
+
+#keep data and levels
+main.short3 <- main.short2[, -(1:2)]
+
+#put lvlAll to rownames and delete last column to keep only data
+rownames(main.short3) <- main.short3$lvl
+main.short4 <- subset(main.short3, select = -c(lvl))
+
+#normalize
+main.short4b <- as.data.frame(t(main.short4))
+norm1 <- main.short4b / main.short4b[,colnames(main.short4b) == "2 0"]
+norm1 <- as.data.frame(t(norm1))
+
+#generate mean+sd from exp.keep
+norm1.stats <- as.data.frame((stat.desc(t(norm1))))
+norm1.stats.T <- as.data.frame(t(norm1.stats))
+norm2 <- cbind(norm1, norm1.stats.T$mean, norm1.stats.T$SE.mean)
+colnames(norm2)[endsWith(colnames(norm2), "$mean")] <- "area"
+colnames(norm2)[endsWith(colnames(norm2), "$SE.mean")] <- "sd"
+#norm2$sd.Value <- norm2$mean + norm2$sd
+
+#get Sample and conc back
+norm2$lvl<- strsplit(rownames(norm2), " ")
+norm2$Day <- sapply(norm2$lvl, function(x) x[1]) 
+norm2$Conc <- sapply(norm2$lvl, function(x) x[2])
+norm2 <- subset(norm2, select = -lvl)
+
+#linear model for statistics
+#rearrange data for long form
+norm2.long <- norm2 %>% gather(exp.keep, key = "exp", value = area)
+
+#convert Day and Conc into numeric, -> variables are used as continous than discrete value
+norm2.long$Day1 <- as.numeric(paste(norm2.long$Day))
+norm2.long$Conc1 <- as.numeric(paste(norm2.long$Conc))
+
+#subset for wanted days for statistics, here: day 0,7
+#norm2.long.subset <- norm2.long[!norm2.long$Day == 0.5,]
+
+#Linear model for all days, conc and day dependent -> co effect
+model <- lm(area~Conc1*Day1, norm2.long)
+summary(model)
+
+#Linear model for day 4, conc and day dependent -> co effect
+#model <- lm(area~Conc1, norm2.long[norm2.long$Day=="4",])
+#summary(model)
+
+#Linear model for day 7, conc and day dependent -> co effect
+model <- lm(area~Conc1, norm2.long[norm2.long$Day=="7",])
+summary(model)
+
+#data summary from LM to dataframe
+model.summary <- summary(model)$coefficients
+model.summary2 <- as.data.frame(t(model.summary[-1,]))
+rownames(model.summary2) <- rownames(model.summary)[-1]
+
+#data collection for graph
+data <- norm2[,!colnames(norm2) %in% c(exp.keep)]
+data$Day1 <- as.numeric(data$Day)
+data$Conc1 <- as.numeric(data$Conc)
+data$Significance[data$Day == 7 & data$Conc == 2] <- "***"
+#data$`ttest group`<- pValues.long$`ttest group`
+#data$pValue.rd<- pValues.long$pValue.rd
+threshold.pValue <- 0.05
+#data$KeepForpValue[data$pValue.rd < threshold.pValue] <- TRUE
+
+#plot
+plot.data <- ggplot(data, aes(x = Day1, y = area, group = Conc), fill=Conc) + 
+  #geom_line(aes(linetype = Conc, colour = Conc), size=3) +
+  geom_line(aes(colour = Conc), size=3) +
+  scale_linetype_manual(values=c("dotted", "longdash", "solid"))+
+  scale_color_manual(labels = c("0 µM", "0.5 µM", "2 µM"), values = c("blue", "red", "black")) +
+  geom_errorbar(aes(ymin = area-sd, ymax = area+sd), width=0.1, size=1.6)+
+  geom_point(aes(colour = Conc), size=6, shape=15)+
+  geom_text(data = data, aes(x=Day1, y=(data$area + data$sd)*1.04,label=data$Significance), size=30, na.rm = TRUE) +
+  #geom_label(data = data, aes(x=2, y=15,label=paste(data$`ttest group`[!data$pValue.rd>0.3], collapse = "\n")), size=20, na.rm = TRUE) +
+  #geom_label(data = data, aes(x=2, y=15,label=paste(
+  #"p-values for p < ",threshold.pValue,"\n",
+  #paste("Day ",pValues.long$Day[pValues.long$significance == "*"],",",pValues.long$sample1[pValues.long$significance == "*"],"5M |",pValues.long$sample2[pValues.long$significance == "*"],"5M: ", pValues.long$pValue.rd[pValues.long$significance == "*"], collapse = "\n"),
+  #sep = "")), size=10, na.rm = TRUE, hjust = 0) +
+  theme_classic()+
+  ylim(c(1,19))+
+  #xlim(c(2,7))+
+  #expand_limits(x=c(5,7))+
+  labs(x = "Days after seeding", y = "Relative area") +
+  #labs(x = "Days after seeding", y = "Area ratio compared to 0 5M - Day2", color = "Concentration") +
+  #xlab("Days after seeding")+
+  #ylab("Area ratio compared to 0 5M - Day2")+
+  #ggtitle("", subtitle = "p-Values: *** < 0.001,  ** < 0.01,  * < 0.05 ") +
+  #ggtitle("", subtitle = paste("p-Value: * < ",threshold.pValue, sep="")) +
+  annotate("rect", xmin = 7.1, xmax = 7.2, ymin = 2, ymax = 15, fill = "white")+
+  theme(
+    element_line(size = 1.2),
+    axis.title = element_text(colour="black", size=40),
+    #axis.title.x = element_text(colour="grey20",face="bold"),
+    #axis.title.y = element_text(colour="grey20",face="bold"),
+    axis.text.x = element_text(colour="black", hjust=0.5, size=30),
+    axis.text.y = element_text(colour="black", size=30),
+    text = element_text(size=30),
+    #panel.grid.minor.y = element_line(colour=("grey"),size=0.1,),
+    axis.line = element_line(size = 2, colour="black"),
+    axis.ticks = element_line(size = 2, colour="black"),
+    axis.ticks.length = unit(.25, "cm"),
+    legend.position = c(0.2, 0.78),
+    legend.text = element_text(colour="black", size = 30),
+    legend.text.align = 0,
+    legend.spacing.x = unit(0.5, "cm"),
+    #legend.title = element_text(colour="black"),
+    legend.title = element_blank(),
+    legend.margin = margin(t = .5, r = .5, b = .5, l = .5, unit = "cm"),
+    legend.key.size = unit(0, "cm"),
+    legend.key.height = unit(1.5, "cm")
+    #legend.background = element_rect(size=2, linetype="solid", colour ="black")
+    )
+plot.data
+
+ggsave(filename = paste("2_graphs/_output.png", sep = ""), 
+       plot = plot.data, 
+       height = 23, width = 30, unit="cm")
+
